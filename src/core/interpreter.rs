@@ -2,22 +2,35 @@ use super::parser::{AstNode, Parser};
 use super::parser::Type;
 extern crate rand;
 
+use regex::Regex;
 use rand::Rng;
 use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
+use std::thread::sleep;
 use crate::core::lexer::lex;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct MatchResult {
+    pub text: String,    // Что было найдено
+    pub start: usize,    // Начальная позиция
+    pub end: usize,      // Конечная позиция
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum RuntimeValue {
     Number(i64),
     Float(f64),
     String(String),
+    Regex(String),
     Boolean(bool),
     Array(Vec<RuntimeValue>),
     Void,
+    MatchValue(Box<MatchResult>),
     ReturnValue(Box<RuntimeValue>),
     ConstValue(Box<RuntimeValue>),
+    MatchArray(Vec<MatchResult>),
 }
 
 #[derive(Debug)]
@@ -52,6 +65,7 @@ impl Interpreter {
             AstNode::Number(n) => Ok(RuntimeValue::Number(*n)),
             AstNode::Float(f) => Ok(RuntimeValue::Float(*f)),
             AstNode::String(s) => Ok(RuntimeValue::String((*s.to_string()).parse().unwrap())),
+            AstNode::Regex(r) => Ok(RuntimeValue::Regex((*r.to_string()).parse().unwrap())),
             AstNode::Boolean(b) => Ok(RuntimeValue::Boolean(*b)),
             AstNode::Array(elements) => Ok(RuntimeValue::Array(elements.iter().map(|e| self.interpret_single(e)).collect::<Result<Vec<RuntimeValue>, String>>()?)),
             AstNode::Index { array, index } => {
@@ -114,13 +128,20 @@ impl Interpreter {
                                 return Err(format!("Cannot reassign constant {}", id));
                             }
 
-                            match (existing_val, &right_val) {
-                                (RuntimeValue::Number(_), RuntimeValue::Number(_)) => {},
-                                (RuntimeValue::Float(_), RuntimeValue::Float(_)) => {},
-                                (RuntimeValue::Boolean(_), RuntimeValue::Boolean(_)) => {},
-                                (RuntimeValue::String(_), RuntimeValue::String(_)) => {},
-                                (RuntimeValue::Array(_), RuntimeValue::Array(_)) => {},
-                                _ => return Err(format!("Type mismatch for variable {}", id)),
+                            if let RuntimeValue::Void = existing_val {}
+                            else {
+                                match (existing_val, &right_val) {
+                                    (RuntimeValue::Number(_), RuntimeValue::Number(_)) => {},
+                                    (RuntimeValue::Float(_), RuntimeValue::Float(_)) => {},
+                                    (RuntimeValue::Boolean(_), RuntimeValue::Boolean(_)) => {},
+                                    (RuntimeValue::String(_), RuntimeValue::String(_)) => {},
+                                    (RuntimeValue::Array(_), RuntimeValue::Array(_)) => {},
+                                    (RuntimeValue::Regex(_), RuntimeValue::Regex(_)) => {},
+                                    (RuntimeValue::MatchValue(_), RuntimeValue::MatchValue(_)) => {},
+                                    (RuntimeValue::ReturnValue(_), RuntimeValue::ReturnValue(_)) => {},
+                                    (RuntimeValue::MatchArray(_), RuntimeValue::MatchArray(_)) => {},
+                                    _ => return Err(format!("Type mismatch for variable {}", id)),
+                                }
                             }
                         }
 
@@ -138,7 +159,7 @@ impl Interpreter {
                                 }
 
                                 if let AstNode::Identifier(id) = array.as_ref() {
-                                    if let Some(RuntimeValue::ReturnValue(_)) = self.variables.get(id) {
+                                    if let Some(RuntimeValue::ConstValue(_)) = self.variables.get(id) {
                                         return Err(format!("Cannot modify constant array {}", id));
                                     }
                                 }
@@ -276,35 +297,95 @@ impl Interpreter {
                     RuntimeValue::Number(v) => println!("{}", v),
                     RuntimeValue::Float(v) => println!("{}", v),
                     RuntimeValue::String(v) => println!("{}", v),
+                    RuntimeValue::Regex(v) => println!("{}", v),
                     RuntimeValue::Boolean(v) => println!("{}", v),
                     RuntimeValue::Array(v) => {
                         self.print_array(&v);
                     }
                     RuntimeValue::Void => println!("()"),
-                    _ => println!("()")
+                    RuntimeValue::MatchValue(m) => {
+                        println!("Match(text: \"{}\", start: {}, end: {})", m.text, m.start, m.end)
+                    }
+                    RuntimeValue::ReturnValue(v) => {
+                        print!("Return(");
+                        self.print_value(&v);
+                        println!(")");
+                    }
+                    RuntimeValue::ConstValue(v) => {
+                        print!("Const(");
+                        self.print_value(&v);
+                        println!(")");
+                    }
+                    RuntimeValue::MatchArray(arr) => {
+                        print!("MatchArray[");
+                        for (i, m) in arr.iter().enumerate() {
+                            if i > 0 { print!(", "); }
+                            print!("Match(text: \"{}\", start: {}, end: {})", m.text, m.start, m.end);
+                        }
+                        println!("]");
+                    }
                 }
                 Ok(RuntimeValue::Void)
             }
             AstNode::Let { name, is_const, var_type, var_value } => {
                 let value = self.interpret_single(var_value)?;
 
-                if let Some(t) = var_type {
-                    match (&value, t) {
-                        (RuntimeValue::Number(_), Type::Int) => {},
-                        (RuntimeValue::Float(_), Type::Float) => {},
-                        (RuntimeValue::Boolean(_), Type::Bool) => {},
-                        (RuntimeValue::String(_), Type::String) => {},
-                        (RuntimeValue::Array(_), Type::Array) => {},
-                        _ => return Err(format!("Type mismatch for variable {}", name)),
+                // Функция для проверки совместимости типов
+                fn is_type_compatible(existing: &RuntimeValue, new: &RuntimeValue, target_type: Option<&Type>) -> bool {
+                    // Если переменная была Void, разрешаем любое присваивание
+                    if let RuntimeValue::Void = existing {
+                        return true;
+                    }
+
+                    // Если указан конкретный тип, проверяем соответствие
+                    if let Some(t) = target_type {
+                        match (existing, t) {
+                            (RuntimeValue::Number(_), Type::Int) => true,
+                            (RuntimeValue::Float(_), Type::Float) => true,
+                            (RuntimeValue::Boolean(_), Type::Bool) => true,
+                            (RuntimeValue::String(_), Type::String) => true,
+                            (RuntimeValue::Regex(_), Type::String) => true, // Regex можно присвоить строке
+                            (RuntimeValue::Array(_), Type::Array) => true,
+                            (RuntimeValue::MatchValue(_), Type::Array) => true, // MatchValue можно присвоить массиву
+                            (RuntimeValue::MatchArray(_), Type::Array) => true, // MatchArray можно присвоить массиву
+                            _ => false,
+                        }
+                    } else {
+                        // Если тип не указан, проверяем что типы идентичны
+                        match (existing, new) {
+                            (RuntimeValue::Number(_), RuntimeValue::Number(_)) => true,
+                            (RuntimeValue::Float(_), RuntimeValue::Float(_)) => true,
+                            (RuntimeValue::Boolean(_), RuntimeValue::Boolean(_)) => true,
+                            (RuntimeValue::String(_), RuntimeValue::String(_)) => true,
+                            (RuntimeValue::Regex(_), RuntimeValue::Regex(_)) => true,
+                            (RuntimeValue::Array(_), RuntimeValue::Array(_)) => true,
+                            (RuntimeValue::MatchValue(_), RuntimeValue::MatchValue(_)) => true,
+                            (RuntimeValue::MatchArray(_), RuntimeValue::MatchArray(_)) => true,
+                            (RuntimeValue::Void, _) => true, // Void можно заменить любым типом
+                            _ => false,
+                        }
                     }
                 }
 
-                if self.variables.contains_key(name) {
-                    return Err(format!("Variable {} already defined", name));
+                // Проверяем, существует ли переменная и можно ли ее переопределить
+                if let Some(existing_val) = self.variables.get(name) {
+                    if let RuntimeValue::ConstValue(_) = existing_val {
+                        return Err(format!("Cannot reassign constant {}", name));
+                    }
+
+                    if !is_type_compatible(existing_val, &value, var_type.as_ref()) {
+                        return Err(format!("Type mismatch for variable {}", name));
+                    }
+                }
+
+                // Проверяем соответствие указанному типу (если есть)
+                if let Some(t) = var_type {
+                    if !is_type_compatible(&RuntimeValue::Void, &value, Some(t)) {
+                        return Err(format!("Value does not match declared type for variable {}", name));
+                    }
                 }
 
                 if *is_const {
-                    // Для констант используем специальный RuntimeValue
                     self.variables.insert(name.clone(), RuntimeValue::ConstValue(Box::new(value)));
                 } else {
                     self.variables.insert(name.clone(), value);
@@ -372,7 +453,8 @@ impl Interpreter {
                 Ok(RuntimeValue::Void)
             }
             AstNode::ForIn { var, iterable, body } => {
-                let iterable_val = self.interpret_single(iterable)?;
+                let iterable_result = self.interpret_single(iterable)?;
+                let iterable_val = self.interpret_constant(iterable_result)?;
 
                 match iterable_val {
                     RuntimeValue::Array(items) => {
@@ -431,13 +513,101 @@ impl Interpreter {
                     RuntimeValue::Float(_f) => Ok(RuntimeValue::String("float".to_string())),
                     RuntimeValue::Boolean(_b) => Ok(RuntimeValue::String("bool".to_string())),
                     RuntimeValue::String(_s) => Ok(RuntimeValue::String("string".to_string())),
+                    RuntimeValue::Regex(_r) => Ok(RuntimeValue::String("regex".to_string())),
                     RuntimeValue::Array(_a) => Ok(RuntimeValue::String("array".to_string())),
                     RuntimeValue::ReturnValue(_v) => Ok(RuntimeValue::String("ReturnValue".to_string())),
+                    RuntimeValue::MatchValue(_m) => Ok(RuntimeValue::String("MatchValue".to_string())),
                     RuntimeValue::Void => Ok(RuntimeValue::String("void".to_string())),
                     RuntimeValue::ConstValue(_c) => Ok(RuntimeValue::String("const".to_string())),
+                    RuntimeValue::MatchArray(_a) => Ok(RuntimeValue::String("MatchArray".to_string())),
                 }
             },
-            &AstNode::Void => todo!(),
+            AstNode::Sleep { expr } => {
+                let value = self.interpret_single(expr.as_ref())?;
+
+                match value {
+                    RuntimeValue::Number(milliseconds) => {
+                        let duration = std::time::Duration::from_millis(milliseconds as u64);
+                        sleep(duration);
+                        Ok(RuntimeValue::Void)
+                    }
+                    RuntimeValue::Float(milliseconds) => {
+                        let duration = std::time::Duration::from_millis(milliseconds as u64);
+                        sleep(duration);
+                        Ok(RuntimeValue::Void)
+                    }
+                    _ => Err("Sleep function expects a number (milliseconds)".to_string()),
+                }
+            }
+            &AstNode::Void => Ok(RuntimeValue::Void),
+            AstNode::Compile { expr, regex } => {
+                let value = self.interpret_single(expr.as_ref())?;
+                let regex_str = self.interpret_single(regex.as_ref())?;
+
+                let text = match value {
+                    RuntimeValue::String(s) => s,
+                    _ => return Err("Expected string for compile expression".to_string()),
+                };
+
+                let regex_pattern = match regex_str {
+                    RuntimeValue::Regex(s) => s,
+                    _ => return Err("Expected string for regex pattern".to_string()),
+                };
+
+                let regex = match Regex::new(&regex_pattern) {
+                    Ok(re) => re,
+                    Err(e) => return Err(format!("Invalid regex pattern: {}", e)),
+                };
+
+                // Ищем первое совпадение
+                if let Some(mat) = regex.find(&text) {
+                    // Возвращаем первый MatchResult
+                    Ok(RuntimeValue::MatchValue(Box::new(MatchResult {
+                        text: mat.as_str().to_string(),
+                        start: mat.start(),
+                        end: mat.end(),
+                    })))
+                } else {
+                    // Если совпадение не найдено, возвращаем Void или null
+                    Ok(RuntimeValue::Void)
+                }
+            },
+            AstNode::CompileAll { expr, regex } => {
+                let value = self.interpret_single(expr.as_ref())?;
+                let regex_str = self.interpret_single(regex.as_ref())?;
+
+                let text = match value {
+                    RuntimeValue::String(s) => s,
+                    _ => return Err("Expected string for CompileAll expression".to_string()),
+                };
+
+                let regex_pattern = match regex_str {
+                    RuntimeValue::Regex(s) => s,
+                    _ => return Err("Expected string for regex pattern".to_string()),
+                };
+
+                let regex = match Regex::new(&regex_pattern) {
+                    Ok(re) => re,
+                    Err(e) => return Err(format!("Invalid regex pattern: {}", e)),
+                };
+
+                // Создаем массив MatchResult
+                let matches: Vec<MatchResult> = regex
+                    .find_iter(&text)
+                    .map(|mat| MatchResult {
+                        text: mat.as_str().to_string(),
+                        start: mat.start(),
+                        end: mat.end(),
+                    })
+                    .collect();
+
+                // Возвращаем как MatchArray или обычный Array с MatchValue
+                Ok(RuntimeValue::Array(
+                    matches.into_iter()
+                        .map(|m| RuntimeValue::MatchValue(Box::new(m)))
+                        .collect()
+                ))
+            },
         }
     }
 
@@ -445,70 +615,166 @@ impl Interpreter {
         print!("[");
         for (i, item) in array.iter().enumerate() {
             if i > 0 { print!(", "); }
-            match item {
-                RuntimeValue::Number(n) => print!("{}", n),
-                RuntimeValue::String(s) => print!("\"{}\"", s),
-                RuntimeValue::Boolean(b) => print!("{}", b),
-                RuntimeValue::Array(a) => self.print_array(a),
-                RuntimeValue::Float(f) => print!("{}", f),
-                RuntimeValue::ReturnValue(v) => print!("{:?}", v),
-                RuntimeValue::ConstValue(v) => print!("{:?}", v),
-                RuntimeValue::Void => print!("()"),
-            }
+            self.print_value(item);
+        }
+        println!("]");
+    }
+
+    fn convert_array(&self, array: &Vec<RuntimeValue>) {
+        let mut buf = String::new();
+        print!("[");
+        for (i, item) in array.iter().enumerate() {
+            if i > 0 { print!(", "); }
+            self.print_value(item);
         }
         println!("]");
     }
 
     fn eval_binop(&self, op: &str, left: RuntimeValue, right: RuntimeValue) -> Result<RuntimeValue, String> {
         match (left, right) {
-            (RuntimeValue::Number(l), RuntimeValue::Number(r)) => match op {
-                "+" => Ok(RuntimeValue::Number(l + r)),
-                "-" => Ok(RuntimeValue::Number(l - r)),
-                "*" => Ok(RuntimeValue::Number(l * r)),
-                "/" => {
-                    if r == 0 {
-                        Err("Division by zero".to_string())
-                    } else {
-                        Ok(RuntimeValue::Number(l / r))
-                    }
-                }
-                "==" => Ok(RuntimeValue::Boolean(l == r)),
-                "!=" => Ok(RuntimeValue::Boolean(l != r)),
-                "<" => Ok(RuntimeValue::Boolean(l < r)),
-                ">" => Ok(RuntimeValue::Boolean(l > r)),
-                "<=" => Ok(RuntimeValue::Boolean(l <= r)),
-                ">=" => Ok(RuntimeValue::Boolean(l >= r)),
-                _ => Err(format!("Unknown operator for numbers: {}", op)),
-            },
-            (RuntimeValue::Boolean(l), RuntimeValue::Boolean(r)) => match op {
-                "==" => Ok(RuntimeValue::Boolean(l == r)),
-                "!=" => Ok(RuntimeValue::Boolean(l != r)),
-                "&&" => Ok(RuntimeValue::Boolean(l && r)),
-                "||" => Ok(RuntimeValue::Boolean(l || r)),
-                _ => Err(format!("Unknown operator for booleans: {}", op)),
-            },
-            (RuntimeValue::Float(l), RuntimeValue::Float(r)) => {  // Добавляем обработку float
-                match op {
-                    "+" => Ok(RuntimeValue::Float(l + r)),
-                    "-" => Ok(RuntimeValue::Float(l - r)),
-                    "*" => Ok(RuntimeValue::Float(l * r)),
-                    "/" => Ok(RuntimeValue::Float(l / r)),
-                    "==" => Ok(RuntimeValue::Boolean(l == r)),
-                    "!=" => Ok(RuntimeValue::Boolean(l != r)),
-                    "<" => Ok(RuntimeValue::Boolean(l < r)),
-                    ">" => Ok(RuntimeValue::Boolean(l > r)),
-                    "<=" => Ok(RuntimeValue::Boolean(l <= r)),
-                    ">=" => Ok(RuntimeValue::Boolean(l >= r)),
-                    _ => Err(format!("Unknown operator for floats: {}", op)),
-                }
-            },
-            (RuntimeValue::String(l), RuntimeValue::String(r)) => match op {
-                "==" => Ok(RuntimeValue::Boolean(l == r)),
-                "!=" => Ok(RuntimeValue::Boolean(l != r)),
-                "+" => Ok(RuntimeValue::String(format!("{}{}", l, r))),
-                _ => Err(format!("Unknown operator for strings: {}", op)),
-            }
+            // Числовые операции (целые и дробные)
+            (RuntimeValue::Number(l), RuntimeValue::Number(r)) => self.num_op(op, l as f64, r as f64),
+            (RuntimeValue::Float(l), RuntimeValue::Float(r)) => self.num_op(op, l, r),
+            (RuntimeValue::Number(l), RuntimeValue::Float(r)) => self.num_op(op, l as f64, r),
+            (RuntimeValue::Float(l), RuntimeValue::Number(r)) => self.num_op(op, l, r as f64),
+
+            // Логические операции
+            (RuntimeValue::Boolean(l), RuntimeValue::Boolean(r)) => self.bool_op(op, l, r),
+            (RuntimeValue::Number(l), RuntimeValue::Boolean(r)) => self.bool_mixed_op(op, l != 0, r),
+            (RuntimeValue::Boolean(l), RuntimeValue::Number(r)) => self.bool_mixed_op(op, l, r != 0),
+
+            // Строковые операции
+            (RuntimeValue::String(l), RuntimeValue::Array(r)) => self.str_op(op, l, RuntimeValue::Array(r)),
+            (RuntimeValue::String(l), right) => self.str_op(op, l, right),
+            (left, RuntimeValue::String(r)) => self.str_op_rev(op, left, r),
+
+            // Операции с массивами
+            (RuntimeValue::Array(mut a), RuntimeValue::Array(b)) => self.array_op(op, &mut a, b),
+
+            // Все остальные случаи
             _ => Err("Type mismatch in binary operation".to_string()),
+        }
+    }
+
+    // Вспомогательные методы
+    fn num_op(&self, op: &str, l: f64, r: f64) -> Result<RuntimeValue, String> {
+        match op {
+            "+" => Ok(RuntimeValue::Float(l + r)),
+            "-" => Ok(RuntimeValue::Float(l - r)),
+            "*" => Ok(RuntimeValue::Float(l * r)),
+            "/" => {
+                if r == 0.0 {
+                    Err("Division by zero".to_string())
+                } else {
+                    Ok(RuntimeValue::Float(l / r))
+                }
+            }
+            "==" => Ok(RuntimeValue::Boolean(l == r)),
+            "!=" => Ok(RuntimeValue::Boolean(l != r)),
+            "<" => Ok(RuntimeValue::Boolean(l < r)),
+            ">" => Ok(RuntimeValue::Boolean(l > r)),
+            "<=" => Ok(RuntimeValue::Boolean(l <= r)),
+            ">=" => Ok(RuntimeValue::Boolean(l >= r)),
+            "&&" => Ok(RuntimeValue::Boolean(l != 0.0 && r != 0.0)),
+            "||" => Ok(RuntimeValue::Boolean(l != 0.0 || r != 0.0)),
+            _ => Err(format!("Unknown operator for numbers: {}", op)),
+        }
+    }
+
+    fn bool_op(&self, op: &str, l: bool, r: bool) -> Result<RuntimeValue, String> {
+        match op {
+            "==" => Ok(RuntimeValue::Boolean(l == r)),
+            "!=" => Ok(RuntimeValue::Boolean(l != r)),
+            "&&" => Ok(RuntimeValue::Boolean(l && r)),
+            "||" => Ok(RuntimeValue::Boolean(l || r)),
+            _ => Err(format!("Unknown operator for booleans: {}", op)),
+        }
+    }
+
+    fn bool_mixed_op(&self, op: &str, l: bool, r: bool) -> Result<RuntimeValue, String> {
+        self.bool_op(op, l, r)
+    }
+
+    fn str_op(&self, op: &str, l: String, right: RuntimeValue) -> Result<RuntimeValue, String> {
+        match op {
+            "+" => Ok(RuntimeValue::String(format!("{}{}", l, self.to_str(right)?))),
+            "==" => Ok(RuntimeValue::Boolean(l == self.to_str(right)?)),
+            "!=" => Ok(RuntimeValue::Boolean(l != self.to_str(right)?)),
+            _ => Err(format!("Unknown operator for strings: {}", op)),
+        }
+    }
+
+    fn str_op_rev(&self, op: &str, left: RuntimeValue, r: String) -> Result<RuntimeValue, String> {
+        match op {
+            "+" => Ok(RuntimeValue::String(format!("{}{}", self.to_str(left)?, r))),
+            _ => self.str_op(op, r, left),
+        }
+    }
+
+    fn array_op(&self, op: &str, a: &mut Vec<RuntimeValue>, b: Vec<RuntimeValue>) -> Result<RuntimeValue, String> {
+        match op {
+            "==" => Ok(RuntimeValue::Boolean(a == &b)),
+            "!=" => Ok(RuntimeValue::Boolean(a != &b)),
+            "+" => {
+                a.extend(b);
+                Ok(RuntimeValue::Array(a.clone()))
+            }
+            "-" => {
+                a.retain(|x| !b.contains(x));
+                Ok(RuntimeValue::Array(a.clone()))
+            }
+            _ => Err(format!("Unknown operator for arrays: {}", op)),
+        }
+    }
+
+    fn to_str(&self, value: RuntimeValue) -> Result<String, String> {
+        match value {
+            RuntimeValue::Number(n) => Ok(n.to_string()),
+            RuntimeValue::Float(f) => Ok(f.to_string()),
+            RuntimeValue::Boolean(b) => Ok(b.to_string()),
+            RuntimeValue::String(s) => Ok(s),
+            _ => Err("Cannot convert to string".to_string()),
+        }
+    }
+
+
+    fn print_value(&self, value: &RuntimeValue) {
+        match value {
+            RuntimeValue::Number(v) => print!("{}", v),
+            RuntimeValue::Float(v) => print!("{}", v),
+            RuntimeValue::String(v) => print!("\"{}\"", v),
+            RuntimeValue::Regex(v) => print!("{}", v),
+            RuntimeValue::Boolean(v) => print!("{}", v),
+            RuntimeValue::Array(v) => self.print_array(v),
+            RuntimeValue::Void => print!("()"),
+            RuntimeValue::MatchValue(m) => print!("Match(text: \"{}\", start: {}, end: {})", m.text, m.start, m.end),
+            RuntimeValue::ReturnValue(v) => {
+                print!("Return(");
+                self.print_value(v);
+                print!(")");
+            }
+            RuntimeValue::ConstValue(v) => {
+                print!("Const(");
+                self.print_value(v);
+                print!(")");
+            }
+            RuntimeValue::MatchArray(arr) => {
+                print!("MatchArray[");
+                for (i, m) in arr.iter().enumerate() {
+                    if i > 0 { print!(", "); }
+                    print!("Match(text: \"{}\", start: {}, end: {})", m.text, m.start, m.end);
+                }
+                print!("]");
+            }
+        }
+    }
+
+    fn interpret_constant(&self, value: RuntimeValue) -> Result<RuntimeValue, String> {
+        // Если это ConstValue, извлекаем внутреннее значение
+        if let RuntimeValue::ConstValue(boxed_value) = value {
+            Ok(*boxed_value)
+        } else {
+            Ok(value)
         }
     }
 }

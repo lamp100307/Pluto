@@ -1,3 +1,6 @@
+use crate::core::lexer::lex;
+
+//types enum
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
@@ -6,20 +9,24 @@ pub enum Type {
     String,
     Array,
     Void,
+    Match
 }
 
+//params
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub param_type: Option<Type>,
 }
 
+//ast nodes
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub enum AstNode {
     Number(i64),
     Float(f64),
     String(String),
+    Regex(String),
     Boolean(bool),
     Array(Vec<AstNode>),
     Void,
@@ -94,8 +101,19 @@ pub enum AstNode {
         types: Type,
         expr: Box<AstNode>
     },
+    Sleep {
+        expr: Box<AstNode>
+    },
     TypeFunc {
         expr: Box<AstNode>
+    },
+    CompileAll {
+        expr: Box<AstNode>,
+        regex: Box<AstNode>
+    },
+    Compile {
+        expr: Box<AstNode>,
+        regex: Box<AstNode>
     },
 }
 
@@ -161,7 +179,7 @@ impl Parser {
             "string" => Ok(Type::String),
             "array" => Ok(Type::Array),
             "void" => Ok(Type::Void),
-            _ => Err(format!("Unknown type: {}", type_str)),
+            _ => Ok(Type::Void)
         }
     }
 
@@ -323,12 +341,141 @@ impl Parser {
             expr: Box::new(expr),
         })
     }
+    
+    fn parse_sleep(&mut self) -> Result<AstNode, String> {
+        self.consume("LPAREN")?;
+        let expr = self.parse_expr()?;
+        self.consume("RPAREN")?;
+        Ok(AstNode::Sleep { expr: Box::new(expr) })
+    }
+
+    fn parse_compile_all(&mut self) -> Result<AstNode, String> {
+        self.consume("LPAREN")?;
+        let expr = self.parse_expr()?;
+        self.consume("COMMA")?;
+        let reg = self.parse_expr()?;
+        self.consume("RPAREN")?;
+        Ok(AstNode::CompileAll { expr: Box::new(expr), regex: Box::new(reg) })
+    }
+
+    fn parse_compile(&mut self) -> Result<AstNode, String> {
+        self.consume("LPAREN")?;
+        let expr = self.parse_expr()?;
+        self.consume("COMMA")?;
+        let reg = self.parse_expr()?;
+        self.consume("RPAREN")?;
+        Ok(AstNode::Compile { expr: Box::new(expr), regex: Box::new(reg) })
+    }
 
     fn parse_type_func(&mut self) -> Result<AstNode, String> {
         self.consume("LPAREN")?;
         let expr = self.parse_expr()?;
         self.consume("RPAREN")?;
         Ok(AstNode::TypeFunc { expr: Box::new(expr) })
+    }
+
+    fn parse_interpolated_string(&mut self, initial_string: String) -> Result<AstNode, String> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut chars = initial_string.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                // Обработка escape-последовательностей
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if c == '$' {
+                if let Some('{') = chars.peek() {
+                    chars.next(); // Пропускаем '{'
+
+                    // Добавляем текущую часть как строку
+                    if !current.is_empty() {
+                        parts.push(AstNode::String(current));
+                        current = String::new();
+                    }
+
+                    // Парсим выражение внутри {}
+                    let mut expr_str = String::new();
+                    let mut brace_count = 1;
+
+                    while let Some(c) = chars.next() {
+                        if c == '{' {
+                            brace_count += 1;
+                            expr_str.push(c);
+                        } else if c == '}' {
+                            brace_count -= 1;
+                            if brace_count == 0 {
+                                break;
+                            } else {
+                                expr_str.push(c);
+                            }
+                        } else {
+                            expr_str.push(c);
+                        }
+                    }
+
+                    if brace_count != 0 {
+                        return Err("Unclosed interpolation brace".to_string());
+                    }
+
+                    // Парсим выражение
+                    let mut expr_parser = Parser::new(lex(&expr_str));
+                    let expr = expr_parser.parse_expr()?;
+                    parts.push(expr);
+                } else if let Some(next) = chars.peek() {
+                    // Простая переменная $var
+                    if next.is_alphabetic() || *next == '_' {
+                        if !current.is_empty() {
+                            parts.push(AstNode::String(current));
+                            current = String::new();
+                        }
+
+                        let mut var_name = String::new();
+                        while let Some(&c) = chars.peek() {
+                            if c.is_alphanumeric() || c == '_' {
+                                var_name.push(c);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+
+                        parts.push(AstNode::Identifier(var_name));
+                    } else {
+                        current.push('$');
+                        current.push(*next);
+                        chars.next();
+                    }
+                } else {
+                    current.push('$');
+                }
+            } else {
+                current.push(c);
+            }
+        }
+
+        // Добавляем оставшуюся часть
+        if !current.is_empty() {
+            parts.push(AstNode::String(current));
+        }
+
+        // Собираем все части в цепочку сложения строк
+        if parts.is_empty() {
+            Ok(AstNode::String(String::new()))
+        } else if parts.len() == 1 {
+            Ok(parts.remove(0))
+        } else {
+            let mut result = parts.remove(0);
+            for part in parts {
+                result = AstNode::BinaryOp {
+                    op: "+".to_string(),
+                    left: Box::new(result),
+                    right: Box::new(part),
+                };
+            }
+            Ok(result)
+        }
     }
 
     // Parse expressions with + and - (lowest precedence)
@@ -387,12 +534,31 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<AstNode, String> {
+        let mut node = self.parse_or_and()?;
+        loop {
+            match self.current_token() {
+                Some((token_type, token_value)) if token_type == "OP" && ["==", "!=", "<", ">", "<=", ">=",].contains(&token_value.as_str()) => {
+                    let op = self.consume("OP")?;
+                    let right = self.parse_factor()?;
+                    node = AstNode::BinaryOp {
+                        op,
+                        left: Box::new(node),
+                        right: Box::new(right),
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(node)
+    }
+
+    fn parse_or_and(&mut self) -> Result<AstNode, String> {
         let mut node = self.parse_factor()?;
         loop {
             match self.current_token() {
-                Some((token_type, token_value)) if token_type == "OP" && ["==", "!=", "<", ">", "<=", ">=", "&&", "||"].contains(&token_value.as_str()) => {
+                Some((token_type, token_value)) if token_type == "OP" && ["&&", "||"].contains(&token_value.as_str()) => {
                     let op = self.consume("OP")?;
-                    let right = self.parse_factor()?;
+                    let right = self.parse_or_and()?;
                     node = AstNode::BinaryOp {
                         op,
                         left: Box::new(node),
@@ -451,7 +617,7 @@ impl Parser {
                                     AstNode::Number(_) => var_type = Some(Type::Int),
                                     AstNode::Boolean(_) => var_type = Some(Type::Bool),
                                     AstNode::Float(_) => var_type = Some(Type::Float),
-                                    _ => Err("Unknown variable type")?
+                                    _ => var_type = Some(Type::Void)
                                 }
                             }
 
@@ -538,6 +704,15 @@ impl Parser {
                         "type" => {
                             Ok(self.parse_type_func()?)
                         }
+                        "sleep" => {
+                            Ok(self.parse_sleep()?)
+                        }
+                        "compile_all" => {
+                            Ok(self.parse_compile_all()?)
+                        }
+                        "compile" => {
+                            Ok(self.parse_compile()?)
+                        }
                         _ => Err(format!("Unexpected keyword: {}", keyword)),
                     }
                 }
@@ -558,7 +733,13 @@ impl Parser {
                 }
                 "STRING" => {
                     let string = self.consume("STRING")?;
-                    Ok(AstNode::String(string))
+                    // Убираем внешние кавычки
+                    let string_content = string[1..string.len()-1].to_string();
+                    self.parse_interpolated_string(string_content)
+                }
+                "REGEX" => {
+                    let regex = self.consume("REGEX")?;
+                    Ok(AstNode::Regex(regex))
                 }
                 "NUM" => {
                     let num_str = self.consume("NUM")?;
@@ -591,27 +772,6 @@ impl Parser {
                             }
                             self.consume("RPAREN")?;
 
-                            // После вызова функции может быть оператор ?
-                            if let Some((next_type, _)) = self.current_token() {
-                                if next_type == "OP" {
-                                    let op = self.peek_op()?;
-                                    if op == "?" {
-                                        self.consume("OP")?;
-                                        let body = self.parse_block()?;
-                                        let else_body = self.parse_optional_else()?;
-
-                                        return Ok(AstNode::If {
-                                            condition: Box::new(AstNode::FunctionCall {
-                                                name: id,
-                                                args,
-                                            }),
-                                            body,
-                                            else_body,
-                                        });
-                                    }
-                                }
-                            }
-
                             return Ok(AstNode::FunctionCall {
                                 name: id,
                                 args,
@@ -619,23 +779,6 @@ impl Parser {
                         }
                     }
 
-                    // Затем проверяем оператор ? для обычного идентификатора
-                    if let Some((token_type, _)) = self.current_token() {
-                        if token_type == "OP" {
-                            let op = self.peek_op()?;
-                            if op == "?" {
-                                self.consume("OP")?;
-                                let body = self.parse_block()?;
-                                let else_body = self.parse_optional_else()?;
-
-                                return Ok(AstNode::If {
-                                    condition: Box::new(AstNode::Identifier(id)),
-                                    body,
-                                    else_body,
-                                });
-                            }
-                        }
-                    }
 
                     // Если ничего из вышеперечисленного - обычный идентификатор
                     Ok(AstNode::Identifier(id))
