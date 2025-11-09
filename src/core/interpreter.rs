@@ -620,16 +620,6 @@ impl Interpreter {
         println!("]");
     }
 
-    fn convert_array(&self, array: &Vec<RuntimeValue>) {
-        let mut buf = String::new();
-        print!("[");
-        for (i, item) in array.iter().enumerate() {
-            if i > 0 { print!(", "); }
-            self.print_value(item);
-        }
-        println!("]");
-    }
-
     fn eval_binop(&self, op: &str, left: RuntimeValue, right: RuntimeValue) -> Result<RuntimeValue, String> {
         match (left, right) {
             // Числовые операции (целые и дробные)
@@ -677,6 +667,7 @@ impl Interpreter {
             ">=" => Ok(RuntimeValue::Boolean(l >= r)),
             "&&" => Ok(RuntimeValue::Boolean(l != 0.0 && r != 0.0)),
             "||" => Ok(RuntimeValue::Boolean(l != 0.0 || r != 0.0)),
+            "%" => Ok(RuntimeValue::Float(l % r)),
             _ => Err(format!("Unknown operator for numbers: {}", op)),
         }
     }

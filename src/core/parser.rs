@@ -9,7 +9,6 @@ pub enum Type {
     String,
     Array,
     Void,
-    Match
 }
 
 //params
@@ -196,25 +195,6 @@ impl Parser {
         Ok(Param { name, param_type })
     }
 
-    fn parse_optional_else(&mut self) -> Result<Option<Vec<AstNode>>, String> {
-        if let Some((t_type, t_value)) = self.current_token() {
-            if t_type == "KEYWORD" && t_value == "else" {
-                self.consume("KEYWORD")?;
-                Ok(Some(self.parse_block()?))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn peek_op(&self) -> Result<String, String> {
-        self.current_token()
-            .and_then(|(t, v)| if t == "OP" { Some(v.clone()) } else { None })
-            .ok_or("Expected operator".to_string())
-    }
-
     fn parse_function(&mut self) -> Result<AstNode, String> {
         let name = self.consume("ID")?;
         self.consume("LPAREN")?;
@@ -341,7 +321,7 @@ impl Parser {
             expr: Box::new(expr),
         })
     }
-    
+
     fn parse_sleep(&mut self) -> Result<AstNode, String> {
         self.consume("LPAREN")?;
         let expr = self.parse_expr()?;
@@ -430,22 +410,17 @@ impl Parser {
                             parts.push(AstNode::String(current));
                             current = String::new();
                         }
-
                         let mut var_name = String::new();
-                        while let Some(&c) = chars.peek() {
-                            if c.is_alphanumeric() || c == '_' {
-                                var_name.push(c);
-                                chars.next();
+                        while let Some(c) = chars.peek() {
+                            if c.is_alphanumeric() || *c == '_' {
+                                var_name.push(chars.next().unwrap());
                             } else {
                                 break;
                             }
                         }
-
                         parts.push(AstNode::Identifier(var_name));
                     } else {
                         current.push('$');
-                        current.push(*next);
-                        chars.next();
                     }
                 } else {
                     current.push('$');
@@ -455,79 +430,64 @@ impl Parser {
             }
         }
 
-        // Добавляем оставшуюся часть
         if !current.is_empty() {
             parts.push(AstNode::String(current));
         }
 
-        // Собираем все части в цепочку сложения строк
-        if parts.is_empty() {
-            Ok(AstNode::String(String::new()))
-        } else if parts.len() == 1 {
-            Ok(parts.remove(0))
+        if parts.len() == 1 {
+            Ok(parts.into_iter().next().unwrap())
         } else {
-            let mut result = parts.remove(0);
+            // Если есть интерполяция, строим бинарные операции конкатенации
+            let mut node = parts.remove(0);
             for part in parts {
-                result = AstNode::BinaryOp {
+                node = AstNode::BinaryOp {
                     op: "+".to_string(),
-                    left: Box::new(result),
+                    left: Box::new(node),
                     right: Box::new(part),
                 };
             }
-            Ok(result)
+            Ok(node)
         }
     }
 
-    // Parse expressions with + and - (lowest precedence)
     fn parse_expr(&mut self) -> Result<AstNode, String> {
         let mut node = self.parse_term()?;
-        loop {
-            match self.current_token() {
-                Some((token_type, token_value)) if token_type == "OP" && (token_value == "+" || token_value == "-")  => {
-                    let op = self.consume("OP")?;
-                    let right = self.parse_term()?;
-                    node = AstNode::BinaryOp {
-                        op,
-                        left: Box::new(node),
-                        right: Box::new(right),
-                    }
-                }
-                Some((token_type, token_value)) if token_type == "OP" && (token_value == "++" || token_value == "--")  => {
-                    let op = self.consume("OP")?;
-                    node = AstNode::UnaryOpTT {
-                        op,
-                        var: Box::new(node)
-                    }
-                },
-                Some((token_type, _)) if token_type == "ASSIGN" => {
-                    self.consume("ASSIGN")?;
-                    let right = self.parse_expr()?;
-                    node = AstNode::Assign {
-                        left: Box::new(node),
-                        right: Box::new(right),
-                    }
-                }
-                _ => break,
+        while let Some((token_type, token_value)) = self.current_token().cloned() {
+            if token_type == "OP" && ["+", "-"].contains(&token_value.as_str()) {
+                let op = self.consume("OP")?;
+                let right = self.parse_term()?;
+                node = AstNode::BinaryOp {
+                    op,
+                    left: Box::new(node),
+                    right: Box::new(right),
+                };
+            } else if token_type == "ASSIGN" {
+                self.consume("ASSIGN")?;
+                let right = self.parse_expr()?;
+                node = AstNode::Assign {
+                    left: Box::new(node),
+                    right: Box::new(right),
+                };
+            } else {
+                break;
             }
         }
         Ok(node)
     }
 
-    // Parse terms with * and / (higher precedence)
     fn parse_term(&mut self) -> Result<AstNode, String> {
         let mut node = self.parse_comparison()?;
-        loop {
-            match self.current_token() {
-                Some((token_type, token_value)) if token_type == "OP" && ["*", "/"].contains(&token_value.as_str()) => {
-                    let op = self.consume("OP")?;
-                    let right = self.parse_comparison()?;
-                    node = AstNode::BinaryOp {
-                        op,
-                        left: Box::new(node),
-                        right: Box::new(right),
-                    };
-                }
-                _ => break,
+        while let Some((token_type, token_value)) = self.current_token().cloned() {
+            if token_type == "OP" && ["*", "/", "%"].contains(&token_value.as_str()) {
+                let op = self.consume("OP")?;
+                let right = self.parse_comparison()?;
+                node = AstNode::BinaryOp {
+                    op,
+                    left: Box::new(node),
+                    right: Box::new(right),
+                };
+            } else {
+                break;
             }
         }
         Ok(node)
@@ -537,7 +497,7 @@ impl Parser {
         let mut node = self.parse_or_and()?;
         loop {
             match self.current_token() {
-                Some((token_type, token_value)) if token_type == "OP" && ["==", "!=", "<", ">", "<=", ">=",].contains(&token_value.as_str()) => {
+                Some((token_type, token_value)) if token_type == "OP" && ["==", "!=", "<", ">", "<=", ">="].contains(&token_value.as_str()) => {
                     let op = self.consume("OP")?;
                     let right = self.parse_factor()?;
                     node = AstNode::BinaryOp {
@@ -556,7 +516,7 @@ impl Parser {
         let mut node = self.parse_factor()?;
         loop {
             match self.current_token() {
-                Some((token_type, token_value)) if token_type == "OP" && ["&&", "||"].contains(&token_value.as_str()) => {
+                Some((token_type, token_value)) if token_type == "OP" && ["&&", "||", "%"].contains(&token_value.as_str()) => {
                     let op = self.consume("OP")?;
                     let right = self.parse_or_and()?;
                     node = AstNode::BinaryOp {
@@ -569,6 +529,43 @@ impl Parser {
             }
         }
         Ok(node)
+    }
+
+    fn parse_if(&mut self) -> Result<AstNode, String> {
+        self.consume("KEYWORD")?; // Consume "if"
+        self.consume("LPAREN")?;
+        let condition = self.parse_expr()?;
+        self.consume("RPAREN")?;
+        let body = self.parse_block()?;
+
+        let else_body = self.parse_else()?;
+
+        Ok(AstNode::If {
+            condition: Box::new(condition),
+            body,
+            else_body,
+        })
+    }
+
+    fn parse_else(&mut self) -> Result<Option<Vec<AstNode>>, String> {
+        if let Some((token_type, token_value)) = self.current_token().cloned() {
+            if token_type == "KEYWORD" && token_value == "else" {
+                self.consume("KEYWORD")?; // Consume "else"
+                if let Some((next_type, next_value)) = self.current_token().cloned() {
+                    if next_type == "KEYWORD" && next_value == "if" {
+                        // Parse "else if" as a nested if
+                        let if_node = self.parse_if()?;
+                        return Ok(Some(vec![if_node]));
+                    } else {
+                        // Parse regular else block
+                        return Ok(Some(self.parse_block()?));
+                    }
+                } else {
+                    return Err("Expected statement after 'else'".to_string());
+                }
+            }
+        }
+        Ok(None)
     }
 
     // Parse basic elements (numbers, identifiers, keywords)
@@ -639,29 +636,7 @@ impl Parser {
                             Ok(AstNode::Input{placeholder: name})
                         }
                         "if" => {
-                            self.consume("LPAREN")?;
-                            let condition = self.parse_expr()?;
-                            self.consume("RPAREN")?;
-
-                            let body = self.parse_block()?;
-
-                            // Проверяем наличие else
-                            let else_body = if let Some((t_type, t_value)) = self.current_token() {
-                                if t_type == "KEYWORD" && t_value == "else" {
-                                    self.consume("KEYWORD")?;
-                                    Some(self.parse_block()?)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-
-                            Ok(AstNode::If {
-                                condition: Box::new(condition),
-                                body,
-                                else_body,
-                            })
+                            self.parse_if()
                         }
                         "while" => {
                             self.consume("LPAREN")?;

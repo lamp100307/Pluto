@@ -13,7 +13,7 @@ pub fn lex(code: &str) -> Vec<(String, String)> {
         ("NEWLINE".to_string(), Regex::new(r"\n+").unwrap()),
         ("COMMENT".to_string(), Regex::new(r"//.*").unwrap()),
         ("ARROW".to_string(), Regex::new(r"->").unwrap()),
-        ("OP".to_string(), Regex::new(r"\?|\+\+|--|\+|-|\*|/|!=|==|<=|>=|<|>|&&|&|\|\|").unwrap()),
+        ("OP".to_string(), Regex::new(r"\?|\+\+|--|\+|-|\*|/|!=|==|<=|>=|<|>|&&|&|%|\|\|").unwrap()),
         ("ASSIGN".to_string(), Regex::new(r"=").unwrap()),
         ("LPAREN".to_string(), Regex::new(r"\(").unwrap()),
         ("RPAREN".to_string(), Regex::new(r"\)").unwrap()),
