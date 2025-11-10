@@ -1,9 +1,10 @@
 extern crate regex;
 
 use regex::Regex;
+use crate::core::lexer::lexer_error::LexerError;
 
-pub fn lex(code: &str) -> Vec<(String, String)> {
-    let keywords = vec!["printf", "let", "import", "if", "else",
+pub fn lex(code: &str) -> Result<Vec<(String, String)>, Vec<LexerError>> {
+    let keywords = vec!["print", "let", "import", "if", "else",
                         "while", "for", "in", "random", "func", "return",
                         "del", "in", "input", "to", "type", "sleep", "compile_all", "compile"];
 
@@ -26,14 +27,15 @@ pub fn lex(code: &str) -> Vec<(String, String)> {
         ("DOT".to_string(), Regex::new(r"\.").unwrap()),
         ("TYPES".to_string(), Regex::new(r"int|float|bool|string|array|void").unwrap()),
         ("FLOAT".to_string(), Regex::new(r"\d+\.\d+").unwrap()),
-        ("NUM".to_string(), Regex::new(r"\d+").unwrap()),
-        ("STRING".to_string(), Regex::new(r#""([^"\\]|\\.|\\\$[^{]|\$\{[^}]*\})*""#).unwrap()),
-        ("REGEX".to_string(), Regex::new(r"\\[^/]+\\").unwrap()), // Исправлено для regex
+        ("NUMBER".to_string(), Regex::new(r"\d+").unwrap()),
+        ("STRING".to_string(), Regex::new(r#""([^"\\]|\\.|\\\$[^{]|\$\{[^}]*})*""#).unwrap()),
+        ("REGEX".to_string(), Regex::new(r"\\[^/]+\\").unwrap()),
         ("BOOL".to_string(), Regex::new(r"true|false").unwrap()),
         ("ID".to_string(), Regex::new(r"[a-zA-Z_][a-zA-Z0-9_]*").unwrap()),
     ];
 
     let mut tokens = Vec::new();
+    let mut errors = Vec::new();
     let mut remaining = code;
 
     //matching tokens
@@ -44,16 +46,16 @@ pub fn lex(code: &str) -> Vec<(String, String)> {
             if let Some(mat) = regex.find(remaining) {
                 if mat.start() == 0 {
                     //skips
-                    if name != "WHITESPACE" && name != "COMMENT" && name != "NEWLINE" {
+                    if name.as_str() != "WHITESPACE" && name.as_str() != "COMMENT" && name.as_str() != "NEWLINE" {
                         let token_value = mat.as_str().to_string();
-                        let token_type = if name == "ID" && keywords.contains(&token_value.as_str()) {
+                        let token_type = if name.as_str() == "ID" && keywords.contains(&token_value.as_str()) {
                             "KEYWORD".to_string()
                         } else {
                             name.clone()
                         };
 
                         // Для строк и regex убираем только внешние кавычки/слэши
-                        let processed_value = if name == "REGEX" {
+                        let processed_value = if name.as_str() == "REGEX" {
                             token_value[1..token_value.len()-1].to_string()
                         } else {
                             token_value
@@ -69,9 +71,19 @@ pub fn lex(code: &str) -> Vec<(String, String)> {
         }
 
         if !matched {
-            panic!("Unexpected character at: {}", remaining);
+            let char = remaining.chars().next().unwrap();
+            let char_len = char.len_utf8();
+
+            errors.push(LexerError::UnexpectedCharacter {char, pos: char_len});
+
+            remaining = &remaining[char_len..];
         }
     }
 
-    tokens
+    // Если есть ошибки, возвращаем их, иначе токены
+    if !errors.is_empty() {
+        Err(errors)
+    } else {
+        Ok(tokens)
+    }
 }
