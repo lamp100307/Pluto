@@ -1,3 +1,5 @@
+use std::fmt;
+
 /* Abstract Syntax Tree */
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
@@ -113,4 +115,18 @@ pub enum AstNode {
         expr: Box<AstNode>,
         regex: Box<AstNode>
     },
+}
+
+
+impl fmt::Display for AstNode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AstNode::Number(n) => write!(f, "Number: {}", n),
+            AstNode::String(s) => write!(f, "String: {}", s),
+            AstNode::BinaryOp { op, left, right } => 
+            write!(f, "binop: {}, left: {}, right: {}", op, left, right),
+
+            _ => write!(f, "Node")
+        }
+    }
 }

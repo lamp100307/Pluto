@@ -4,6 +4,7 @@ use colored::Colorize;
 use crate::core::lexer::lexer_error::LexerError;
 use crate::core::parser::ast_nodes::AstNode;
 use crate::core::parser::parser_error::ParserError;
+use crate::core::interpreter::interpreter::RuntimeValue;
 
 // Вспомогательная функция для показа контекста ошибки
 fn get_error_context(code: &str, pos: usize) -> Option<String> {
@@ -224,5 +225,40 @@ fn print_simple_node(node: &AstNode, depth: usize) {
             print_simple_node(&right, depth + 1);
         }
         _ => println!("{:?}", node),
+    }
+}
+
+pub fn print_runtime_value(v: RuntimeValue) {
+    match v {
+        RuntimeValue::Number(n) => println!("Number: {}", n),
+        RuntimeValue::Array(a) => {
+            print!("Array: [");
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 {
+                    print!(", ");
+                }
+                match item {
+                    RuntimeValue::Number(n) => print!("{}", n),
+                    RuntimeValue::String(s) => print!("\"{}\"", s),
+                    RuntimeValue::Boolean(b) => print!("{}", b),
+                    RuntimeValue::Float(f) => print!("{}", f),
+                    _ => print!("{:?}", item), 
+                }
+            }
+            println!("]");
+        },
+        RuntimeValue::Float(f) => println!("Float: {}", f),
+        RuntimeValue::Boolean(b) => println!("Boolean: {}", b), 
+        RuntimeValue::ConstValue(c) => {
+            print!("Const value: ");
+            print_runtime_value(*c);
+        },
+        RuntimeValue::String(s) => println!("String: \"{}\"", s),
+        RuntimeValue::Void => println!("Void"), // Исправлено: убрали скобки ()
+        RuntimeValue::Regex(r) => println!("Regex: /{}/", r),
+        RuntimeValue::ReturnValue(r) => {
+            print!("Return value: ");
+            print_runtime_value(*r); 
+        },
     }
 }

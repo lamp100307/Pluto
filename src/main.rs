@@ -7,9 +7,10 @@ use std::io::Read;
 use colored::*;
 use core::lexer::lexer::lex;
 use core::parser::Parser;
-use debug_func::debug_func::{debug_tokens, parse_error, parse_parser_error, print_ast};
+use core::interpreter::interpreter::Interpreter;
+use debug_func::debug_func::{debug_tokens, parse_error, parse_parser_error, print_ast, print_runtime_value};
  
-fn main(){
+fn main() {
     let args = std::env::args().collect::<Vec<_>>();
 
     if args.len() < 2 {
@@ -43,7 +44,6 @@ fn main(){
     let tokens = match tokens_result {
         Ok(tokens) => {
             println!("{}", "✅ LEXING COMPLETED SUCCESSFULLY".green().bold());
-            println!();
 
             if debug {
                 debug_tokens(&tokens);
@@ -60,16 +60,34 @@ fn main(){
     let mut parser = Parser::new(tokens);
     let parse_result = parser.parse();
     
-    let _ast = match parse_result {
+    let ast = match parse_result {
         Ok(ast) => {
             println!("{}", "✅ PARSING COMPLETED SUCCESSFULLY".green().bold());
             
             if debug {
                 print_ast(&ast);
             }
+
+            ast
         }
         Err(errors) => {
-            parse_parser_error(errors, &code)
+            parse_parser_error(errors, &code);
+            std::process::exit(2);
         }
     };
-} 
+
+    // Исправленная часть для интерпретатора
+    let mut interpreter = Interpreter::new();
+    let result = interpreter.interpret(ast);
+    
+    match result {
+        Ok(value) => {
+            println!("{}", "✅ INTERPRETATION COMPLETED SUCCESSFULLY".green().bold());
+            print_runtime_value(value);
+        }
+        Err(error) => {
+            eprintln!("{}: {}", "❌ INTERPRETATION FAILED".red().bold(), error);
+            std::process::exit(3);
+        }
+    }
+}
